@@ -1,9 +1,14 @@
 import { Config } from "@/config/config"
-import { ConfigPlugin } from "@/config/plugin"
+import { ConfigPluginV1 } from "@opencode-ai/core/v1/config/plugin"
 import { KilocodeKeybinds } from "@/kilocode/tui/keybinds"
+import { KiloTitleIcon } from "@/kilocode/cli/cmd/tui/title-icon"
 import { Authorization } from "@/server/routes/instance/httpapi/middleware/authorization"
 import { InstanceContextMiddleware } from "@/server/routes/instance/httpapi/middleware/instance-context"
-import { WorkspaceRoutingMiddleware } from "@/server/routes/instance/httpapi/middleware/workspace-routing"
+import {
+  WorkspaceRoutingMiddleware,
+  WorkspaceRoutingQuery,
+  WorkspaceRoutingQueryFields,
+} from "@/server/routes/instance/httpapi/middleware/workspace-routing"
 import { described } from "@/server/routes/instance/httpapi/groups/metadata"
 import { Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
@@ -15,6 +20,14 @@ const TuiScoped = TuiScope.annotate({ default: "project" })
 const ProjectScope = Schema.Literal("project").annotate({ default: "project" })
 const Origin = Schema.Literals(["project", "global", "system", "default"])
 const UnknownRecord = Schema.Record(Schema.String, Schema.Unknown)
+const ConfigTarget = Schema.Struct({
+  scope: Scope,
+  path: Schema.String,
+  revision: Schema.String,
+  exists: Schema.Boolean,
+  writable: Schema.Boolean,
+  raw: UnknownRecord,
+})
 const ModelRef = Schema.Struct({ providerID: Schema.String, modelID: Schema.String })
 const Resolved = Schema.Struct({
   key: Schema.String,
@@ -40,13 +53,32 @@ const Source = Schema.Struct({
   reason: Schema.optional(Schema.String),
 })
 
-export const ConfigOverlayQuery = Schema.Struct({ scope: Schema.optional(Scoped) })
-export const ConfigOverlayPatch = Schema.Struct({
+export const ConfigOverlayQuery = Schema.Struct({
+  ...WorkspaceRoutingQueryFields,
   scope: Schema.optional(Scoped),
+})
+export const ConfigOverlayPatch = Schema.Struct({
+  scope: Scope,
   set: Schema.optional(UnknownRecord),
   unset: Schema.optional(Schema.Array(Schema.Array(Schema.String))),
+  // Optional: clients that did not read a revision (anything but the settings
+  // page) still write unconditionally instead of failing the request.
+  expected: Schema.optional(Schema.Struct({ path: Schema.String, revision: Schema.String })),
 })
-export const ConfigRulesQuery = Schema.Struct({ scope: Schema.optional(ProjectScope) })
+export class ConfigOverlayConflictError extends Schema.ErrorClass<ConfigOverlayConflictError>(
+  "ConfigOverlayConflictError",
+)(
+  {
+    code: Schema.Literals(["target-changed", "revision-conflict"]),
+    message: Schema.String,
+    target: ConfigTarget,
+  },
+  { httpApiStatus: 409 },
+) {}
+export const ConfigRulesQuery = Schema.Struct({
+  ...WorkspaceRoutingQueryFields,
+  scope: Schema.optional(ProjectScope),
+})
 const ConfigRulesFile = Schema.Struct({
   name: Schema.String,
   path: Schema.String,
@@ -70,9 +102,9 @@ export const ConfigOverlayResponse = Schema.Struct({
   project: Config.Info,
   sources: Schema.Array(Source),
   targets: Schema.Struct({
-    global: Schema.optional(Schema.String),
-    project: Schema.optional(Schema.String),
-    active: Schema.optional(Schema.String),
+    global: ConfigTarget,
+    project: ConfigTarget,
+    active: ConfigTarget,
   }),
   fields: Schema.Record(Schema.String, Resolved),
   collections: Schema.Record(Schema.String, Schema.Array(Resolved)),
@@ -88,13 +120,17 @@ export const ConfigModelStateResponse = Schema.Struct({
   variant: Schema.Record(Schema.String, Schema.String),
 }).annotate({ identifier: "ConfigModelStateResponse" })
 
-export const TuiConfigQuery = Schema.Struct({ scope: Schema.optional(TuiScoped) })
+export const TuiConfigQuery = Schema.Struct({
+  ...WorkspaceRoutingQueryFields,
+  scope: Schema.optional(TuiScoped),
+})
 const TuiConfigShape = {
   $schema: Schema.optional(Schema.String),
   theme: Schema.optional(Schema.String),
   keybinds: Schema.optional(Schema.Record(Schema.String, Schema.String)),
-  plugin: Schema.optional(Schema.Array(ConfigPlugin.Spec)),
+  plugin: Schema.optional(Schema.Array(ConfigPluginV1.Spec)),
   plugin_enabled: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
+  title_icon: Schema.optional(KiloTitleIcon.Value),
   scroll_speed: Schema.optional(Schema.Number),
   scroll_acceleration: Schema.optional(Schema.Struct({ enabled: Schema.Boolean })),
   diff_style: Schema.optional(Schema.Literals(["auto", "stacked"])),
@@ -140,6 +176,7 @@ export const ConfigConsoleApi = HttpApi.make("config-console")
           }),
         ),
         HttpApiEndpoint.get("sources", ConfigConsolePaths.sources, {
+          query: WorkspaceRoutingQuery,
           success: described(ConfigSourcesResponse, "Config source inventory"),
         }).annotateMerge(
           OpenApi.annotations({
@@ -149,6 +186,7 @@ export const ConfigConsoleApi = HttpApi.make("config-console")
           }),
         ),
         HttpApiEndpoint.get("effective", ConfigConsolePaths.effective, {
+          query: WorkspaceRoutingQuery,
           success: described(Config.Info, "Effective config info"),
         }).annotateMerge(
           OpenApi.annotations({
@@ -158,8 +196,10 @@ export const ConfigConsoleApi = HttpApi.make("config-console")
           }),
         ),
         HttpApiEndpoint.patch("overlayUpdate", ConfigConsolePaths.overlay, {
+          query: WorkspaceRoutingQuery,
           payload: ConfigOverlayPatch,
-          success: described(Config.Info, "Effective configuration after patch"),
+          success: described(ConfigOverlayResponse, "Resolved config overlay after patch"),
+          error: ConfigOverlayConflictError,
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "config.overlayUpdate",
@@ -179,6 +219,7 @@ export const ConfigConsoleApi = HttpApi.make("config-console")
           }),
         ),
         HttpApiEndpoint.put("rulesUpdate", ConfigConsolePaths.rules, {
+          query: WorkspaceRoutingQuery,
           payload: ConfigRulesPatch,
           success: described(ConfigRulesResponse, "Project rules after update"),
         }).annotateMerge(
@@ -189,6 +230,7 @@ export const ConfigConsoleApi = HttpApi.make("config-console")
           }),
         ),
         HttpApiEndpoint.get("modelState", ConfigConsolePaths.modelState, {
+          query: WorkspaceRoutingQuery,
           success: described(ConfigModelStateResponse, "Model state"),
         }).annotateMerge(
           OpenApi.annotations({
@@ -198,6 +240,7 @@ export const ConfigConsoleApi = HttpApi.make("config-console")
           }),
         ),
         HttpApiEndpoint.patch("modelStateUpdate", ConfigConsolePaths.modelState, {
+          query: WorkspaceRoutingQuery,
           payload: ConfigModelStatePatch,
           success: described(ConfigModelStateResponse, "Updated model state"),
         }).annotateMerge(
@@ -208,6 +251,7 @@ export const ConfigConsoleApi = HttpApi.make("config-console")
           }),
         ),
         HttpApiEndpoint.get("tuiConfigGet", ConfigConsolePaths.tuiConfig, {
+          query: WorkspaceRoutingQuery,
           success: described(TuiConfigResponse, "Effective TUI configuration"),
         }).annotateMerge(
           OpenApi.annotations({
@@ -217,6 +261,7 @@ export const ConfigConsoleApi = HttpApi.make("config-console")
           }),
         ),
         HttpApiEndpoint.get("tuiKeybindList", ConfigConsolePaths.tuiKeybinds, {
+          query: WorkspaceRoutingQuery,
           success: described(TuiKeybindListResponse, "TUI keybind metadata"),
         }).annotateMerge(
           OpenApi.annotations({

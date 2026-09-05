@@ -16,17 +16,45 @@ describe("model preview data collection line", () => {
 
     expect(data).toBeGreaterThanOrEqual(0)
     expect(context).toBeGreaterThan(data)
-    expect(preview).toContain('Icon name="brain-circuit"')
+    expect(preview).toContain('Icon name="book-open-check"')
     expect(preview).toContain("isDataCollectedModel(model())")
     expect(preview).toContain('language.t("model.tag.dataCollected")')
     expect(styles).toContain(".model-preview-data-line")
   })
 
-  it("uses the brain circuit icon for all webview model data disclosures", () => {
-    expect(selector).toContain('Icon name="brain-circuit"')
+  it("renders prompt training independently from the model badges", () => {
+    expect(selector).toContain("isDataCollectedModel(model)")
+    expect(preview).toContain("isDataCollectedModel(model())")
+    expect(agent).toContain("isDataCollectedModel(model)")
+  })
+
+  it("renders BYOK availability independently from training metadata", () => {
+    expect(selector).toContain("hasByok(model)")
+    expect(preview).toContain("hasByok(model())")
+    expect(agent).toContain("hasByok(model)")
+    expect(selector).toContain(">BYOK</Tag>")
+    expect(preview).toContain(">BYOK</span>")
+    expect(agent).toContain(">BYOK</span>")
+  })
+
+  it("shows BYOK instead of Free when both metadata fields are set", () => {
+    expect(selector).toContain("isFree(model) && !hasByok(model)")
+    expect(preview).toContain("model().isFree && !hasByok(model())")
+    expect(agent).toContain("model.isFree && !hasByok(model)")
+  })
+
+  it("uses neutral colors for the main model picker BYOK badge", () => {
+    expect(selector).toContain("model-selector-data-badge--byok")
+    expect(styles).toContain(".model-selector-data-badge--byok")
+    expect(styles).toContain("background: var(--vscode-badge-background) !important")
+    expect(styles).toContain("color: var(--vscode-badge-foreground) !important")
+  })
+
+  it("uses the book open check icon for all webview model data disclosures", () => {
+    expect(selector).toContain('Icon name="book-open-check"')
     expect(selector).not.toContain('Icon name="warning"')
-    expect(agent).toContain('Icon name="brain-circuit"')
+    expect(agent).toContain('Icon name="book-open-check"')
     expect(agent).not.toContain('Icon name="warning"')
-    expect(icons).toContain('"brain-circuit"')
+    expect(icons).toContain('"book-open-check"')
   })
 })
